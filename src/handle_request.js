@@ -7,6 +7,44 @@ export async function handleRequest(request) {
   const pathname = url.pathname;
   const search = url.search;
 
+  const groqRoutePrefix = '/groq';
+
+  if (pathname.startsWith(groqRoutePrefix)) {
+    const groqKeysRaw = request.headers.get('x-groq-api-key') || '';
+    const groqKeys = groqKeysRaw.split(',').map(k => k.trim()).filter(k => k);
+    const selectedGroqKey = groqKeys.length > 0
+      ? groqKeys[Math.floor(Math.random() * groqKeys.length)]
+      : null;
+    if (!selectedGroqKey) {
+      return new Response('No Groq API Key provided', { status: 401 });
+    }
+
+    const groqApiPath = pathname.substring(groqRoutePrefix.length);
+    const targetUrl = `https://api.groq.com/openai/v1${groqApiPath}${search}`;
+
+    const headers = new Headers(request.headers);
+    headers.set('Authorization', `Bearer ${selectedGroqKey}`);
+    headers.delete('x-groq-api-key');
+
+    const response = await fetch(targetUrl, {
+      method: request.method,
+      headers,
+      body: request.body,
+    });
+
+    const respHeaders = new Headers(response.headers);
+    respHeaders.delete('transfer-encoding');
+    respHeaders.delete('connection');
+    respHeaders.delete('keep-alive');
+    respHeaders.delete('content-encoding');
+    respHeaders.set('Referrer-Policy', 'no-referrer');
+
+    return new Response(response.body, {
+      status: response.status,
+      headers: respHeaders,
+    });
+  }
+
   if (pathname === '/' || pathname === '/index.html') {
     return new Response('Proxy is Running!  More Details: https://github.com/tech-shrimp/gemini-balance-lite', {
       status: 200,
