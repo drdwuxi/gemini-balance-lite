@@ -2,118 +2,115 @@ import { handleVerification } from './verify_keys.js';
 import openai from './openai.mjs';
 
 export async function handleRequest(request) {
-
   const url = new URL(request.url);
   const pathname = url.pathname;
   const search = url.search;
 
   const groqRoutePrefix = '/groq';
 
-  if (pathname.startsWith(groqRoutePrefix)) {
-    const groqKeysRaw = request.headers.get('x-groq-api-key') || '';
-    const groqKeys = groqKeysRaw.split(',').map(k => k.trim()).filter(k => k);
-    const selectedGroqKey = groqKeys.length > 0
-      ? groqKeys[Math.floor(Math.random() * groqKeys.length)]
-      : null;
-    if (!selectedGroqKey) {
-      return new Response('No Groq API Key provided', { status: 401 });
+  try {
+    // --- Groq API Proxy Logic ---
+    if (pathname.startsWith(groqRoutePrefix)) {
+      // 1. Parse and select a Groq API Key
+      const groqKeysRaw = request.headers.get('x-groq-api-key') || '';
+      const groqKeys = groqKeysRaw.split(',').map(k => k.trim()).filter(k => k);
+      if (groqKeys.length === 0) {
+        return new Response('No Groq API Key provided in x-groq-api-key header', { status: 401 });
+      }
+      const selectedGroqKey = groqKeys[Math.floor(Math.random() * groqKeys.length)];
+
+      // 2. Construct the target Groq API URL
+      const groqApiPath = pathname.substring(groqRoutePrefix.length);
+      const targetUrl = `https://api.groq.com/openai/v1${groqApiPath}${search}`;
+      console.log(`[Groq Proxy] Forwarding to: ${targetUrl}`);
+
+      // 3. Buffer the request body to avoid stream consumption issues
+      const requestBody = await request.arrayBuffer();
+
+      // 4. Create new headers for the outgoing request
+      const newHeaders = new Headers(request.headers);
+      newHeaders.set('Authorization', `Bearer ${selectedGroqKey}`);
+      newHeaders.delete('x-groq-api-key'); // Remove original key header
+
+      // 5. Forward the request to Groq
+      const response = await fetch(targetUrl, {
+        method: request.method,
+        headers: newHeaders,
+        body: requestBody.byteLength > 0 ? requestBody : undefined,
+      });
+
+      // 6. Clean up and return the response
+      const respHeaders = new Headers(response.headers);
+      respHeaders.delete('transfer-encoding');
+      respHeaders.delete('connection');
+      respHeaders.delete('keep-alive');
+      respHeaders.delete('content-encoding');
+      respHeaders.set('Referrer-Policy', 'no-referrer');
+
+      return new Response(response.body, {
+        status: response.status,
+        headers: respHeaders,
+      });
     }
 
-    const groqApiPath = pathname.substring(groqRoutePrefix.length);
-    const targetUrl = `https://api.groq.com/openai/v1${groqApiPath}${search}`;
+    // --- Existing Routes (Gemini, OpenAI, etc.) ---
 
-    const headers = new Headers(request.headers);
-    headers.set('Authorization', `Bearer ${selectedGroqKey}`);
-    headers.delete('x-groq-api-key');
+    if (pathname === '/' || pathname === '/index.html') {
+      return new Response('Proxy is Running! More Details: https://github.com/tech-shrimp/gemini-balance-lite', {
+        status: 200,
+        headers: { 'Content-Type': 'text/html' }
+      });
+    }
 
-    const response = await fetch(targetUrl, {
-      method: request.method,
-      headers,
-      body: request.body,
-    });
+    if (pathname === '/verify' && request.method === 'POST') {
+      return handleVerification(request);
+    }
 
-    const respHeaders = new Headers(response.headers);
-    respHeaders.delete('transfer-encoding');
-    respHeaders.delete('connection');
-    respHeaders.delete('keep-alive');
-    respHeaders.delete('content-encoding');
-    respHeaders.set('Referrer-Policy', 'no-referrer');
-
-    return new Response(response.body, {
-      status: response.status,
-      headers: respHeaders,
-    });
-  }
-
-  if (pathname === '/' || pathname === '/index.html') {
-    return new Response('Proxy is Running!  More Details: https://github.com/tech-shrimp/gemini-balance-lite', {
-      status: 200,
-      headers: { 'Content-Type': 'text/html' }
-    });
-  }
-
-  if (pathname === '/verify' && request.method === 'POST') {
-    return handleVerification(request);
-  }
-
-  // 处理OpenAI格式请求
-  if (url.pathname.endsWith("/chat/completions") || url.pathname.endsWith("/completions") || url.pathname.endsWith("/embeddings") || url.pathname.endsWith("/models")) {
-    return openai.fetch(request);
-  }
-
-  const targetUrl = `https://generativelanguage.googleapis.com${pathname}${search}`;
-
-  try {
-    const headers = new Headers();
+    // Handle OpenAI-compatible format requests (delegated)
+    if (url.pathname.endsWith("/chat/completions") || url.pathname.endsWith("/completions") || url.pathname.endsWith("/embeddings") || url.pathname.endsWith("/models")) {
+        return openai.fetch(request);
+    }
+    
+    // --- Gemini API Proxy Logic ---
+    const geminiTargetUrl = `https://generativelanguage.googleapis.com${pathname}${search}`;
+    const geminiHeaders = new Headers();
     for (const [key, value] of request.headers.entries()) {
       if (key.trim().toLowerCase() === 'x-goog-api-key') {
         const apiKeys = value.split(',').map(k => k.trim()).filter(k => k);
         if (apiKeys.length > 0) {
           const selectedKey = apiKeys[Math.floor(Math.random() * apiKeys.length)];
-          console.log(`Gemini Selected API Key: ${selectedKey}`);
-          headers.set('x-goog-api-key', selectedKey);
+          console.log(`[Gemini Proxy] Selected API Key: ${selectedKey}`);
+          geminiHeaders.set('x-goog-api-key', selectedKey);
         }
-      } else {
-        if (key.trim().toLowerCase()==='content-type')
-        {
-           headers.set(key, value);
-        }
+      } else if (key.trim().toLowerCase() === 'content-type') {
+        geminiHeaders.set(key, value);
       }
     }
 
-    console.log('Request Sending to Gemini')
-    console.log('targetUrl:'+targetUrl)
-    console.log(headers)
-
-    const response = await fetch(targetUrl, {
+    console.log(`[Gemini Proxy] Forwarding to: ${geminiTargetUrl}`);
+    const geminiResponse = await fetch(geminiTargetUrl, {
       method: request.method,
-      headers: headers,
+      headers: geminiHeaders,
       body: request.body
     });
 
-    console.log("Call Gemini Success")
+    const geminiResponseHeaders = new Headers(geminiResponse.headers);
+    geminiResponseHeaders.delete('transfer-encoding');
+    geminiResponseHeaders.delete('connection');
+    geminiResponseHeaders.delete('keep-alive');
+    geminiResponseHeaders.delete('content-encoding');
+    geminiResponseHeaders.set('Referrer-Policy', 'no-referrer');
 
-    const responseHeaders = new Headers(response.headers);
-
-    console.log('Header from Gemini:')
-    console.log(responseHeaders)
-
-    responseHeaders.delete('transfer-encoding');
-    responseHeaders.delete('connection');
-    responseHeaders.delete('keep-alive');
-    responseHeaders.delete('content-encoding');
-    responseHeaders.set('Referrer-Policy', 'no-referrer');
-
-    return new Response(response.body, {
-      status: response.status,
-      headers: responseHeaders
+    return new Response(geminiResponse.body, {
+      status: geminiResponse.status,
+      headers: geminiResponseHeaders
     });
 
-  } catch (error) {
-   console.error('Failed to fetch:', error);
-   return new Response('Internal Server Error\n' + error?.stack, {
-    status: 500,
-    headers: { 'Content-Type': 'text/plain' }
-   });
+  } catch (err) {
+    console.error(`[Request Error] Path: ${pathname}, Error:`, err);
+    return new Response(`Internal Server Error: ${err.message || err}`, {
+      status: 500,
+      headers: { 'Content-Type': 'text/plain' }
+    });
+  }
 }
-};
