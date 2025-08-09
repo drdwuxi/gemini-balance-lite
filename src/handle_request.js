@@ -11,27 +11,44 @@ export async function handleRequest(request) {
   try {
     // --- Groq API Proxy Logic ---
     if (pathname.startsWith(groqRoutePrefix)) {
-      // 1. 支持多种API Key传递方式
-      let selectedGroqKey = '';
+      // 1. 支持多种API Key传递方式，正确处理多个key
+      let groqKeys = [];
       
-      // 方式1: 从 x-groq-api-key header 获取
+      // 方式1: 从 x-groq-api-key header 获取（支持逗号分隔）
       const groqKeysRaw = request.headers.get('x-groq-api-key') || '';
-      const groqKeys = groqKeysRaw.split(',').map(k => k.trim()).filter(k => k);
+      if (groqKeysRaw.trim()) {
+        const keys = groqKeysRaw.split(',').map(k => k.trim()).filter(k => k.length > 0);
+        groqKeys.push(...keys);
+      }
       
       // 方式2: 从 Authorization header 获取 (Sider 常用方式)
       const authHeader = request.headers.get('authorization') || '';
       if (authHeader.startsWith('Bearer ')) {
         const authKey = authHeader.substring(7).trim();
         if (authKey) {
-          groqKeys.push(authKey);
+          // 检查Authorization header中是否也包含逗号分隔的多个key
+          if (authKey.includes(',')) {
+            const authKeys = authKey.split(',').map(k => k.trim()).filter(k => k.length > 0);
+            groqKeys.push(...authKeys);
+          } else {
+            groqKeys.push(authKey);
+          }
         }
       }
       
+      // 去重并过滤空值
+      groqKeys = [...new Set(groqKeys)].filter(k => k.length > 0);
+      
       if (groqKeys.length === 0) {
-        return new Response('No Groq API Key provided. Use x-groq-api-key header or Authorization: Bearer header', { status: 401 });
+        return new Response('No Groq API Key provided. Use x-groq-api-key header or Authorization: Bearer header', { 
+          status: 401,
+          headers: { 'Content-Type': 'application/json' }
+        });
       }
       
-      selectedGroqKey = groqKeys[Math.floor(Math.random() * groqKeys.length)];
+      // 随机选择一个API Key
+      const selectedGroqKey = groqKeys[Math.floor(Math.random() * groqKeys.length)];
+      console.log(`[Groq Proxy] Selected API Key (${groqKeys.length} available): ${selectedGroqKey.substring(0, 10)}...`);
 
       // 2. 构建目标URL
       const groqApiPath = pathname.substring(groqRoutePrefix.length);
@@ -44,11 +61,12 @@ export async function handleRequest(request) {
       // 4. 构建新的headers
       const newHeaders = new Headers();
       for (const [key, value] of request.headers.entries()) {
-        if (key.toLowerCase() !== 'x-groq-api-key' && 
-            key.toLowerCase() !== 'authorization' &&
-            key.toLowerCase() !== 'host' &&
-            key.toLowerCase() !== 'origin' &&
-            key.toLowerCase() !== 'referer') {
+        const lowerKey = key.toLowerCase();
+        if (lowerKey !== 'x-groq-api-key' && 
+            lowerKey !== 'authorization' &&
+            lowerKey !== 'host' &&
+            lowerKey !== 'origin' &&
+            lowerKey !== 'referer') {
           newHeaders.set(key, value);
         }
       }
@@ -56,26 +74,41 @@ export async function handleRequest(request) {
       newHeaders.set('Content-Type', 'application/json');
 
       // 5. 转发请求
-      const groqResponse = await fetch(targetUrl, {
-        method: request.method,
-        headers: newHeaders,
-        body: requestBody.byteLength > 0 ? requestBody : undefined,
-      });
+      try {
+        const groqResponse = await fetch(targetUrl, {
+          method: request.method,
+          headers: newHeaders,
+          body: requestBody.byteLength > 0 ? requestBody : undefined,
+        });
 
-      // 6. 处理响应
-      const responseHeaders = new Headers(groqResponse.headers);
-      responseHeaders.delete('transfer-encoding');
-      responseHeaders.delete('connection');
-      responseHeaders.delete('keep-alive');
-      responseHeaders.delete('content-encoding');
-      responseHeaders.set('Access-Control-Allow-Origin', '*');
-      responseHeaders.set('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-      responseHeaders.set('Access-Control-Allow-Headers', 'Content-Type, Authorization, x-groq-api-key');
+        // 6. 处理响应
+        const responseHeaders = new Headers(groqResponse.headers);
+        responseHeaders.delete('transfer-encoding');
+        responseHeaders.delete('connection');
+        responseHeaders.delete('keep-alive');
+        responseHeaders.delete('content-encoding');
+        responseHeaders.set('Access-Control-Allow-Origin', '*');
+        responseHeaders.set('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+        responseHeaders.set('Access-Control-Allow-Headers', 'Content-Type, Authorization, x-groq-api-key');
 
-      return new Response(groqResponse.body, {
-        status: groqResponse.status,
-        headers: responseHeaders
-      });
+        return new Response(groqResponse.body, {
+          status: groqResponse.status,
+          headers: responseHeaders
+        });
+
+      } catch (fetchError) {
+        console.error(`[Groq Proxy] Fetch error with key ${selectedGroqKey.substring(0, 10)}...:`, fetchError);
+        return new Response(JSON.stringify({
+          error: {
+            message: `Groq API request failed: ${fetchError.message}`,
+            type: "proxy_error",
+            code: "fetch_failed"
+          }
+        }), {
+          status: 500,
+          headers: { 'Content-Type': 'application/json' }
+        });
+      }
     }
 
     // Handle CORS preflight requests
@@ -110,26 +143,37 @@ export async function handleRequest(request) {
       return openai.fetch(request);
     }
     
-    // --- Gemini API Proxy Logic (同样支持Authorization header) ---
+    // --- Gemini API Proxy Logic (同样修复多key处理) ---
     const geminiTargetUrl = `https://generativelanguage.googleapis.com${pathname}${search}`;
     const geminiHeaders = new Headers();
     
-    // 支持多种API Key传递方式
-    let geminiApiKey = '';
+    // 支持多个Gemini API Key
+    let geminiKeys = [];
     const geminiKeysRaw = request.headers.get('x-goog-api-key') || '';
-    const geminiKeys = geminiKeysRaw.split(',').map(k => k.trim()).filter(k => k);
+    if (geminiKeysRaw.trim()) {
+      const keys = geminiKeysRaw.split(',').map(k => k.trim()).filter(k => k.length > 0);
+      geminiKeys.push(...keys);
+    }
     
     const authHeader = request.headers.get('authorization') || '';
     if (authHeader.startsWith('Bearer ')) {
       const authKey = authHeader.substring(7).trim();
       if (authKey) {
-        geminiKeys.push(authKey);
+        if (authKey.includes(',')) {
+          const authKeys = authKey.split(',').map(k => k.trim()).filter(k => k.length > 0);
+          geminiKeys.push(...authKeys);
+        } else {
+          geminiKeys.push(authKey);
+        }
       }
     }
     
+    geminiKeys = [...new Set(geminiKeys)].filter(k => k.length > 0);
+    
     if (geminiKeys.length > 0) {
-      geminiApiKey = geminiKeys[Math.floor(Math.random() * geminiKeys.length)];
-      geminiHeaders.set('x-goog-api-key', geminiApiKey);
+      const selectedGeminiKey = geminiKeys[Math.floor(Math.random() * geminiKeys.length)];
+      console.log(`[Gemini Proxy] Selected API Key (${geminiKeys.length} available): ${selectedGeminiKey.substring(0, 10)}...`);
+      geminiHeaders.set('x-goog-api-key', selectedGeminiKey);
     }
     
     for (const [key, value] of request.headers.entries()) {
@@ -159,9 +203,15 @@ export async function handleRequest(request) {
 
   } catch (err) {
     console.error(`[Request Error] Path: ${pathname}, Error:`, err);
-    return new Response(`Internal Server Error: ${err.message || err}`, {
+    return new Response(JSON.stringify({
+      error: {
+        message: `Internal Server Error: ${err.message || err}`,
+        type: "proxy_error", 
+        code: "internal_error"
+      }
+    }), {
       status: 500,
-      headers: { 'Content-Type': 'text/plain' }
+      headers: { 'Content-Type': 'application/json' }
     });
   }
 }
