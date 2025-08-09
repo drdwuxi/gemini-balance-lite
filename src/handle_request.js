@@ -19,9 +19,10 @@ export async function handleRequest(request) {
       }
       const selectedGroqKey = groqKeys[Math.floor(Math.random() * groqKeys.length)];
 
-      // 2. Construct the target Groq API URL
+      // 2. 修复：正确构建目标URL
+      // 从 /groq/openai/v1/chat/completions 提取 /openai/v1/chat/completions
       const groqApiPath = pathname.substring(groqRoutePrefix.length);
-      const targetUrl = `https://api.groq.com/openai/v1${groqApiPath}${search}`;
+      const targetUrl = `https://api.groq.com${groqApiPath}${search}`;
       console.log(`[Groq Proxy] Forwarding to: ${targetUrl}`);
 
       // 3. Buffer the request body to avoid stream consumption issues
@@ -61,6 +62,18 @@ export async function handleRequest(request) {
         status: groqResponse.status,
         headers: responseHeaders
       });
+    }
+
+    // --- 其他路由处理 ---
+    if (pathname === '/' || pathname === '/index.html') {
+      return new Response('Proxy is Running! More Details: https://github.com/tech-shrimp/gemini-balance-lite', {
+        status: 200,
+        headers: { 'Content-Type': 'text/html' }
+      });
+    }
+
+    if (pathname === '/verify' && request.method === 'POST') {
+      return handleVerification(request);
     }
 
     // Handle OpenAI-compatible format requests (delegated)
