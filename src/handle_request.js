@@ -28,52 +28,53 @@ export async function handleRequest(request) {
       const requestBody = await request.arrayBuffer();
 
       // 4. Create new headers for the outgoing request
-      const newHeaders = new Headers(request.headers);
+      const newHeaders = new Headers();
+      // 复制必要的headers
+      for (const [key, value] of request.headers.entries()) {
+        if (key.toLowerCase() !== 'x-groq-api-key' && 
+            key.toLowerCase() !== 'host' &&
+            key.toLowerCase() !== 'origin' &&
+            key.toLowerCase() !== 'referer') {
+          newHeaders.set(key, value);
+        }
+      }
       newHeaders.set('Authorization', `Bearer ${selectedGroqKey}`);
-      newHeaders.delete('x-groq-api-key'); // Remove original key header
+      newHeaders.set('Content-Type', 'application/json');
 
       // 5. Forward the request to Groq
-      const response = await fetch(targetUrl, {
+      const groqResponse = await fetch(targetUrl, {
         method: request.method,
         headers: newHeaders,
         body: requestBody.byteLength > 0 ? requestBody : undefined,
       });
 
-      // 6. Clean up and return the response
-      const respHeaders = new Headers(response.headers);
-      respHeaders.delete('transfer-encoding');
-      respHeaders.delete('connection');
-      respHeaders.delete('keep-alive');
-      respHeaders.delete('content-encoding');
-      respHeaders.set('Referrer-Policy', 'no-referrer');
+      // 6. 处理响应headers
+      const responseHeaders = new Headers(groqResponse.headers);
+      responseHeaders.delete('transfer-encoding');
+      responseHeaders.delete('connection');
+      responseHeaders.delete('keep-alive');
+      responseHeaders.delete('content-encoding');
+      responseHeaders.set('Referrer-Policy', 'no-referrer');
 
-      return new Response(response.body, {
-        status: response.status,
-        headers: respHeaders,
+      // 7. 返回响应
+      return new Response(groqResponse.body, {
+        status: groqResponse.status,
+        headers: responseHeaders
       });
-    }
-
-    // --- Existing Routes (Gemini, OpenAI, etc.) ---
-
-    if (pathname === '/' || pathname === '/index.html') {
-      return new Response('Proxy is Running! More Details: https://github.com/tech-shrimp/gemini-balance-lite', {
-        status: 200,
-        headers: { 'Content-Type': 'text/html' }
-      });
-    }
-
-    if (pathname === '/verify' && request.method === 'POST') {
-      return handleVerification(request);
     }
 
     // Handle OpenAI-compatible format requests (delegated)
-    if (url.pathname.endsWith("/chat/completions") || url.pathname.endsWith("/completions") || url.pathname.endsWith("/embeddings") || url.pathname.endsWith("/models")) {
-        return openai.fetch(request);
+    if (url.pathname.endsWith("/chat/completions") || 
+        url.pathname.endsWith("/completions") || 
+        url.pathname.endsWith("/embeddings") || 
+        url.pathname.endsWith("/models")) {
+      return openai.fetch(request);
     }
     
     // --- Gemini API Proxy Logic ---
     const geminiTargetUrl = `https://generativelanguage.googleapis.com${pathname}${search}`;
     const geminiHeaders = new Headers();
+    
     for (const [key, value] of request.headers.entries()) {
       if (key.trim().toLowerCase() === 'x-goog-api-key') {
         const apiKeys = value.split(',').map(k => k.trim()).filter(k => k);
@@ -83,7 +84,7 @@ export async function handleRequest(request) {
           geminiHeaders.set('x-goog-api-key', selectedKey);
         }
       } else if (key.trim().toLowerCase() === 'content-type') {
-        geminiHeaders.set(key, value);
+        geminiHeaders.set('Content-Type', value);
       }
     }
 
