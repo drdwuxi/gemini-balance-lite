@@ -11,28 +11,41 @@ export async function handleRequest(request) {
   try {
     // --- Groq API Proxy Logic ---
     if (pathname.startsWith(groqRoutePrefix)) {
-      // 1. Parse and select a Groq API Key
+      // 1. 支持多种API Key传递方式
+      let selectedGroqKey = '';
+      
+      // 方式1: 从 x-groq-api-key header 获取
       const groqKeysRaw = request.headers.get('x-groq-api-key') || '';
       const groqKeys = groqKeysRaw.split(',').map(k => k.trim()).filter(k => k);
-      if (groqKeys.length === 0) {
-        return new Response('No Groq API Key provided in x-groq-api-key header', { status: 401 });
+      
+      // 方式2: 从 Authorization header 获取 (Sider 常用方式)
+      const authHeader = request.headers.get('authorization') || '';
+      if (authHeader.startsWith('Bearer ')) {
+        const authKey = authHeader.substring(7).trim();
+        if (authKey) {
+          groqKeys.push(authKey);
+        }
       }
-      const selectedGroqKey = groqKeys[Math.floor(Math.random() * groqKeys.length)];
+      
+      if (groqKeys.length === 0) {
+        return new Response('No Groq API Key provided. Use x-groq-api-key header or Authorization: Bearer header', { status: 401 });
+      }
+      
+      selectedGroqKey = groqKeys[Math.floor(Math.random() * groqKeys.length)];
 
-      // 2. 修复：正确构建目标URL
-      // 从 /groq/openai/v1/chat/completions 提取 /openai/v1/chat/completions
+      // 2. 构建目标URL
       const groqApiPath = pathname.substring(groqRoutePrefix.length);
       const targetUrl = `https://api.groq.com${groqApiPath}${search}`;
       console.log(`[Groq Proxy] Forwarding to: ${targetUrl}`);
 
-      // 3. Buffer the request body to avoid stream consumption issues
+      // 3. 处理请求体
       const requestBody = await request.arrayBuffer();
 
-      // 4. Create new headers for the outgoing request
+      // 4. 构建新的headers
       const newHeaders = new Headers();
-      // 复制必要的headers
       for (const [key, value] of request.headers.entries()) {
         if (key.toLowerCase() !== 'x-groq-api-key' && 
+            key.toLowerCase() !== 'authorization' &&
             key.toLowerCase() !== 'host' &&
             key.toLowerCase() !== 'origin' &&
             key.toLowerCase() !== 'referer') {
@@ -42,25 +55,38 @@ export async function handleRequest(request) {
       newHeaders.set('Authorization', `Bearer ${selectedGroqKey}`);
       newHeaders.set('Content-Type', 'application/json');
 
-      // 5. Forward the request to Groq
+      // 5. 转发请求
       const groqResponse = await fetch(targetUrl, {
         method: request.method,
         headers: newHeaders,
         body: requestBody.byteLength > 0 ? requestBody : undefined,
       });
 
-      // 6. 处理响应headers
+      // 6. 处理响应
       const responseHeaders = new Headers(groqResponse.headers);
       responseHeaders.delete('transfer-encoding');
       responseHeaders.delete('connection');
       responseHeaders.delete('keep-alive');
       responseHeaders.delete('content-encoding');
-      responseHeaders.set('Referrer-Policy', 'no-referrer');
+      responseHeaders.set('Access-Control-Allow-Origin', '*');
+      responseHeaders.set('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+      responseHeaders.set('Access-Control-Allow-Headers', 'Content-Type, Authorization, x-groq-api-key');
 
-      // 7. 返回响应
       return new Response(groqResponse.body, {
         status: groqResponse.status,
         headers: responseHeaders
+      });
+    }
+
+    // Handle CORS preflight requests
+    if (request.method === 'OPTIONS') {
+      return new Response(null, {
+        status: 200,
+        headers: {
+          'Access-Control-Allow-Origin': '*',
+          'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+          'Access-Control-Allow-Headers': 'Content-Type, Authorization, x-groq-api-key, x-goog-api-key',
+        },
       });
     }
 
@@ -84,19 +110,30 @@ export async function handleRequest(request) {
       return openai.fetch(request);
     }
     
-    // --- Gemini API Proxy Logic ---
+    // --- Gemini API Proxy Logic (同样支持Authorization header) ---
     const geminiTargetUrl = `https://generativelanguage.googleapis.com${pathname}${search}`;
     const geminiHeaders = new Headers();
     
+    // 支持多种API Key传递方式
+    let geminiApiKey = '';
+    const geminiKeysRaw = request.headers.get('x-goog-api-key') || '';
+    const geminiKeys = geminiKeysRaw.split(',').map(k => k.trim()).filter(k => k);
+    
+    const authHeader = request.headers.get('authorization') || '';
+    if (authHeader.startsWith('Bearer ')) {
+      const authKey = authHeader.substring(7).trim();
+      if (authKey) {
+        geminiKeys.push(authKey);
+      }
+    }
+    
+    if (geminiKeys.length > 0) {
+      geminiApiKey = geminiKeys[Math.floor(Math.random() * geminiKeys.length)];
+      geminiHeaders.set('x-goog-api-key', geminiApiKey);
+    }
+    
     for (const [key, value] of request.headers.entries()) {
-      if (key.trim().toLowerCase() === 'x-goog-api-key') {
-        const apiKeys = value.split(',').map(k => k.trim()).filter(k => k);
-        if (apiKeys.length > 0) {
-          const selectedKey = apiKeys[Math.floor(Math.random() * apiKeys.length)];
-          console.log(`[Gemini Proxy] Selected API Key: ${selectedKey}`);
-          geminiHeaders.set('x-goog-api-key', selectedKey);
-        }
-      } else if (key.trim().toLowerCase() === 'content-type') {
+      if (key.trim().toLowerCase() === 'content-type') {
         geminiHeaders.set('Content-Type', value);
       }
     }
@@ -113,7 +150,7 @@ export async function handleRequest(request) {
     geminiResponseHeaders.delete('connection');
     geminiResponseHeaders.delete('keep-alive');
     geminiResponseHeaders.delete('content-encoding');
-    geminiResponseHeaders.set('Referrer-Policy', 'no-referrer');
+    geminiResponseHeaders.set('Access-Control-Allow-Origin', '*');
 
     return new Response(geminiResponse.body, {
       status: geminiResponse.status,
